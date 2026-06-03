@@ -1,0 +1,137 @@
+pipeline {
+    agent any
+
+    environment {
+        // Must match the SonarQube server name configured in Jenkins
+        // Jenkins → Manage Jenkins → Configure System → SonarQube servers
+        SONAR_SERVER   = 'SonarQube'
+
+        // Credential ID for SonarQube token stored in Jenkins credentials
+        SONAR_TOKEN    = credentials('sonar-token')
+
+        // Docker image name
+        IMAGE_NAME     = 'calculator-app'
+        IMAGE_TAG      = "${env.BUILD_NUMBER}"
+    }
+
+    tools {
+        maven 'Maven-3.9'   // Must match the name in Jenkins Global Tool Configuration
+        jdk   'JDK-17'      // Must match the name in Jenkins Global Tool Configuration
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo '📥 Checking out source code...'
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                echo '🔨 Building project...'
+                sh 'mvn clean compile -B'
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                echo '🧪 Running unit tests...'
+                sh 'mvn test -B'
+            }
+            post {
+                always {
+                    // Publish JUnit test results
+                    junit '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Code Coverage') {
+            steps {
+                echo '📊 Generating JaCoCo coverage report...'
+                sh 'mvn verify -B'
+            }
+            post {
+                always {
+                    // Publish JaCoCo coverage report (requires JaCoCo plugin in Jenkins)
+                    jacoco(
+                        execPattern: '**/target/jacoco.exec',
+                        classPattern: '**/target/classes',
+                        sourcePattern: '**/src/main/java',
+                        exclusionPattern: '**/test/**'
+                    )
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                echo '🔍 Running SonarQube analysis...'
+                withSonarQubeEnv("${SONAR_SERVER}") {
+                    sh """
+                        mvn sonar:sonar \
+                            -Dsonar.projectKey=calculator-app \
+                            -Dsonar.projectName='Calculator App' \
+                            -Dsonar.token=${SONAR_TOKEN} \
+                            -B
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                echo '🚦 Waiting for SonarQube Quality Gate...'
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                echo '📦 Packaging application...'
+                sh 'mvn package -DskipTests -B'
+                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo "🐳 Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest"
+            }
+        }
+
+        // Optional — uncomment if you have a Docker registry configured
+        // stage('Docker Push') {
+        //     steps {
+        //         withCredentials([usernamePassword(
+        //             credentialsId: 'docker-hub-creds',
+        //             usernameVariable: 'DOCKER_USER',
+        //             passwordVariable: 'DOCKER_PASS'
+        //         )]) {
+        //             sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
+        //             sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+        //             sh "docker push ${IMAGE_NAME}:latest"
+        //         }
+        //     }
+        // }
+    }
+
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+        }
+        failure {
+            echo '❌ Pipeline failed. Check the logs above.'
+        }
+        always {
+            echo '🧹 Cleaning up workspace...'
+            cleanWs()
+        }
+    }
+}
